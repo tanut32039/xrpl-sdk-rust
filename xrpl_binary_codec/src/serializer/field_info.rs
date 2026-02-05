@@ -260,5 +260,20 @@ fn create_field_info_map() -> HashMap<String, FieldInfo> {
     insert_field_info!(map, "HookParameters", 19, Array);
     insert_field_info!(map, "HookGrants", 20, Array);
     insert_field_info!(map, "ArrayEndMarker", 1, Array);
+
+
+    insert_field_info!(map, "OracleDocumentID", 51, UInt32);
+    insert_field_info!(map, "LastUpdateTime", 15, UInt32);
+    insert_field_info!(map, "AssetClass", 28, Blob);
+    insert_field_info!(map, "Provider", 29, Blob);
+
+    insert_field_info!(map, "PriceDataSeries", 24, Array);
+    insert_field_info!(map, "PriceData", 32, Object);
+
+    insert_field_info!(map, "BaseAsset", 1, Currency);
+    insert_field_info!(map, "QuoteAsset", 2, Currency);
+    insert_field_info!(map, "AssetPrice", 23, UInt64);
+    insert_field_info!(map, "Scale", 4, UInt8);
+
     map
 }

@@ -19,6 +19,7 @@ pub enum TypeCode {
     UInt64 = 3,
     Array = 15,
     Object = 14,
+    Currency = 26,
 }
 
 impl fmt::Display for TypeCode {

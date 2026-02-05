@@ -1,9 +1,11 @@
 use crate::alloc::{string::String, vec, vec::Vec};
 use crate::error::BinaryCodecError;
+use crate::serializer::field_info::field_info_lookup;
 use crate::serializer::{
     field_id::{FieldId, TypeCode},
     field_info::FieldInfo,
 };
+use serde_json::Value;
 use xrpl_types::{
     AccountId, Amount, Blob, Hash128, Hash160, Hash256, UInt16, UInt32, UInt8, Uint64,
 };
@@ -131,6 +133,12 @@ impl Deserializer {
         let bytes = match info.field_type {
             TypeCode::Hash256 => self.deserialize_hash256()?.0.to_vec(),
             TypeCode::AccountId => self.deserialize_account_id()?.0.to_vec(),
+            // NEW: Handle TypeCode::Currency (20 bytes)
+            TypeCode::Currency => {
+                let mut buf = [0u8; 20];
+                self.read_exact(&mut buf)?;
+                buf.to_vec()
+            }
             TypeCode::Blob => {
                 let hint =
                     size_hint.ok_or(BinaryCodecError::FieldNotFound("missing hint".into()))?;
@@ -138,6 +146,41 @@ impl Deserializer {
             }
             TypeCode::Object => self.deserialize_object()?,
             TypeCode::Array => self.deserialize_array()?,
+            TypeCode::UInt8 => {
+                vec![self.read_u8()?]
+            }
+            TypeCode::UInt16 => {
+                let mut buf = [0u8; 2];
+                self.read_exact(&mut buf)?;
+                buf.to_vec()
+            }
+            TypeCode::UInt32 => {
+                let mut buf = [0u8; 4];
+                self.read_exact(&mut buf)?;
+                buf.to_vec()
+            }
+            TypeCode::UInt64 => {
+                let mut buf = [0u8; 8];
+                self.read_exact(&mut buf)?;
+                buf.to_vec()
+            }
+            TypeCode::Amount => {
+                if self.bytes.remaining() < 1 {
+                    return Err(BinaryCodecError::InsufficientBytes("Amount check".into()));
+                }
+                let first_byte = self.bytes[0];
+                // If bit 0x80 is set, it's 48 bytes (IOU). If 0, it's 8 bytes (XRP).
+                let len = if first_byte & 0x80 != 0 { 48 } else { 8 };
+
+                if self.bytes.remaining() < len {
+                    return Err(BinaryCodecError::InsufficientBytes("Amount read".into()));
+                }
+
+                let mut buf = vec![0u8; len];
+                self.read_exact(&mut buf)?;
+                buf
+            }
+
             _ => vec![], // TODO: default other types to Blob for now
         };
         Ok(bytes)
@@ -147,7 +190,6 @@ impl Deserializer {
         self.bytes.remaining() == 0
     }
 
-    #[cfg(feature = "json")]
     pub fn to_json(
         &mut self,
         type_code: &TypeCode,
@@ -160,17 +202,67 @@ impl Deserializer {
                     data.try_into().map_err(|_| BinaryCodecError::Overflow)?;
                 Ok(Value::String(AccountId(account_bytes).to_address()))
             }
+            // NEW: Handle TypeCode::Currency JSON conversion
+            TypeCode::Currency => {
+                if data.len() != 20 {
+                    return Err(BinaryCodecError::InvalidLength(
+                        "Currency must be 20 bytes".into(),
+                    ));
+                }
+
+                // 1. Check if it's the special "All Zeros" case for native XRP
+                if data.iter().all(|&b| b == 0) {
+                    return Ok(Value::String("XRP".into()));
+                }
+
+                // 2. Standard ISO check (12 bytes 0s, 3 bytes ASCII, 5 bytes 0s)
+                let is_iso =
+                    data[0..12].iter().all(|&b| b == 0) && data[15..20].iter().all(|&b| b == 0);
+
+                if is_iso {
+                    let code = String::from_utf8_lossy(&data[12..15])
+                        .trim_matches(char::from(0))
+                        .to_string();
+                    Ok(Value::String(code))
+                } else {
+                    // 3. Non-standard/Hex (e.g., "Demurrage" or custom tokens)
+                    Ok(Value::String(hex::encode_upper(data)))
+                }
+            }
+            TypeCode::UInt8 => Ok(Value::Number(data[0].into())),
+            TypeCode::UInt16 => {
+                let val = u16::from_be_bytes(data.try_into().unwrap_or([0; 2]));
+                Ok(Value::Number(val.into()))
+            }
+            TypeCode::UInt32 => {
+                let val = u32::from_be_bytes(data.try_into().unwrap_or([0; 4]));
+                Ok(Value::Number(val.into()))
+            }
+            // UInt64 is often returned as a string in XRPL JSON to avoid precision loss in JS
+            TypeCode::UInt64 => {
+                let val = u64::from_be_bytes(data.try_into().unwrap_or([0; 8]));
+                Ok(Value::String(val.to_string()))
+            }
+            TypeCode::Amount => {
+                let val = u64::from_be_bytes(data.try_into().unwrap()) & 0x3FFFFFFFFFFFFFFF;
+                Ok(Value::String(val.to_string()))
+            }
             TypeCode::Blob => Ok(Value::String(hex::encode_upper(data))),
             TypeCode::Object => {
+                // 1. Create a local scope deserializer for ONLY this object's data
+                let mut inner = Deserializer::new(data.to_vec(), field_info_lookup());
+
                 let mut accumulator: HashMap<String, Value> = HashMap::new();
-                self.bytes = Bytes::from(data.to_vec());
-                while self.bytes.remaining() > 0 {
-                    let field: FieldInstance = self.read_field()?;
+
+                // 2. Use 'inner' instead of 'self'
+                while inner.bytes.remaining() > 0 {
+                    let field = inner.read_field()?;
                     if field.name == constants::OBJECT_END_MARKER_NAME {
                         break;
                     }
-                    let data_read = self.read_field_value(&field.info)?;
-                    let json_value = self.to_json(&field.info.field_type, &data_read)?;
+                    let data_read = inner.read_field_value(&field.info)?;
+                    // 3. Recurse using the child deserializer
+                    let json_value = inner.to_json(&field.info.field_type, &data_read)?;
                     accumulator.insert(field.name, json_value);
                 }
                 Ok(Value::Object(accumulator.into_iter().collect()))
@@ -179,11 +271,16 @@ impl Deserializer {
                 let mut result = Vec::new();
                 self.bytes = Bytes::from(data.to_vec());
                 while self.bytes.remaining() > 0 {
+                    // 1. Read Header
                     let field = self.read_field()?;
                     if field.name == constants::ARRAY_END_MARKER_NAME {
                         break;
                     }
+
+                    // 2. Read Data
                     let data_read = self.read_field_value(&field.info)?;
+
+                    // 3. Convert to JSON
                     let json_value = self.to_json(&field.info.field_type, &data_read)?;
 
                     let obj: serde_json::Map<String, Value> =
@@ -495,8 +592,8 @@ mod tests {
         );
         // assert!(false, "✅ testing failure; this is successful!");
     }
-
-    #[cfg(feature = "json")]
+    
+#[cfg(feature = "json")]
     #[test]
     fn test_decode_txn_obj() {
         let encoded_tx_obj = "5916969036626990000000000000000000F236FD752B5E4C84810AB3D41A3C2580732102A6934E87988466B98B51F2EB09E5BC4C09E46EB5F1FE08723DF8AD23D5BB9C6A74473045022100FB7583772B8F348F4789620C5571146B6517887AC231B38E29D7688D73F9D2510220615DC87698A2BA64DF2CA83BD9A214002F74C2D615CA20E328AC4AB5E4CDE8BC811424A53BB5CAAD40A961836FEF648E8424846EC75AF9EA7C1F687474703A2F2F6578616D706C652E636F6D2F6D656D6F2F67656E657269637D0472656E74E1F1";
