@@ -1,11 +1,9 @@
 use crate::alloc::{string::String, vec, vec::Vec};
 use crate::error::BinaryCodecError;
-use crate::serializer::field_info::field_info_lookup;
 use crate::serializer::{
     field_id::{FieldId, TypeCode},
     field_info::FieldInfo,
 };
-use serde_json::Value;
 use xrpl_types::{
     AccountId, Amount, Blob, Hash128, Hash160, Hash256, UInt16, UInt32, UInt8, Uint64,
 };
@@ -190,6 +188,7 @@ impl Deserializer {
         self.bytes.remaining() == 0
     }
 
+    #[cfg(feature = "json")]
     pub fn to_json(
         &mut self,
         type_code: &TypeCode,
@@ -250,6 +249,8 @@ impl Deserializer {
             TypeCode::Blob => Ok(Value::String(hex::encode_upper(data))),
             TypeCode::Object => {
                 // 1. Create a local scope deserializer for ONLY this object's data
+
+                use crate::serializer::field_info::field_info_lookup;
                 let mut inner = Deserializer::new(data.to_vec(), field_info_lookup());
 
                 let mut accumulator: HashMap<String, Value> = HashMap::new();
@@ -592,8 +593,8 @@ mod tests {
         );
         // assert!(false, "✅ testing failure; this is successful!");
     }
-    
-#[cfg(feature = "json")]
+
+    #[cfg(feature = "json")]
     #[test]
     fn test_decode_txn_obj() {
         let encoded_tx_obj = "5916969036626990000000000000000000F236FD752B5E4C84810AB3D41A3C2580732102A6934E87988466B98B51F2EB09E5BC4C09E46EB5F1FE08723DF8AD23D5BB9C6A74473045022100FB7583772B8F348F4789620C5571146B6517887AC231B38E29D7688D73F9D2510220615DC87698A2BA64DF2CA83BD9A214002F74C2D615CA20E328AC4AB5E4CDE8BC811424A53BB5CAAD40A961836FEF648E8424846EC75AF9EA7C1F687474703A2F2F6578616D706C652E636F6D2F6D656D6F2F67656E657269637D0472656E74E1F1";
